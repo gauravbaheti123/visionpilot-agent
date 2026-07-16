@@ -6,6 +6,9 @@ import time
 import threading
 import urllib.request
 from supabase import create_client
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.oauth2 import service_account
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIG.TXT SE READ KARO
@@ -13,19 +16,15 @@ from supabase import create_client
 def read_config():
     config = {}
     config_path = "C:\\VisionPilot\\config.txt"
-    
     if not os.path.exists(config_path):
         print("❌ config.txt nahi mila!")
-        print("Please reinstall VisionPilot.")
         input("Press Enter to exit...")
         exit()
-    
     with open(config_path, "r") as f:
         for line in f:
             if "=" in line:
                 key, value = line.strip().split("=", 1)
                 config[key.strip()] = value.strip()
-    
     return config
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -37,10 +36,8 @@ def check_update():
         url = "https://raw.githubusercontent.com/gauravbaheti123/visionpilot-agent/refs/heads/main/visionpilot.py"
         temp_path = "C:\\VisionPilot\\visionpilot_new.py"
         urllib.request.urlretrieve(url, temp_path)
-        
         current_size = os.path.getsize("C:\\VisionPilot\\visionpilot.py")
         new_size = os.path.getsize(temp_path)
-        
         if new_size != current_size:
             print("✅ Update mila! Applying...")
             os.replace(temp_path, "C:\\VisionPilot\\visionpilot.py")
@@ -52,13 +49,55 @@ def check_update():
             print("✅ Already latest version!")
     except Exception as e:
         print(f"⚠️ Update check failed: {e}")
-        print("Continuing with current version...")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# GOOGLE DRIVE SETUP
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CREDENTIALS_FILE = "C:\\VisionPilot\\credentials.json"
+DRIVE_FOLDER_ID = "1sTDvhEBUcA9vmydsFYeIAU4Rt1t-uNvq"
+
+def get_drive_service():
+    creds = service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    return build("drive", "v3", credentials=creds)
+
+def upload_to_drive(filepath, filename):
+    try:
+        service = get_drive_service()
+        file_metadata = {
+            "name": filename,
+            "parents": [DRIVE_FOLDER_ID]
+        }
+        media = MediaFileUpload(filepath, mimetype="image/jpeg")
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id"
+        ).execute()
+
+        file_id = file.get("id")
+
+        # Public access do
+        service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"}
+        ).execute()
+
+        # Direct view URL
+        public_url = f"https://drive.google.com/uc?id={file_id}"
+        print(f"📸 Drive pe upload: {public_url}")
+        return public_url
+
+    except Exception as e:
+        print(f"❌ Drive upload error: {e}")
+        return None
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SETUP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("🔥 VisionPilot Starting...")
-
 check_update()
 
 config = read_config()
@@ -120,24 +159,26 @@ def process_camera(cam):
         current_time = time.time()
 
         if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
-            
-            # UTC store karo Supabase mein
             now_utc = datetime.now(timezone.utc)
-            # IST sirf print ke liye
             now_ist = now_utc.astimezone(IST)
             timestamp = now_ist.strftime("%Y%m%d_%H%M%S")
 
-            # Snapshot
-            filename = f"{SNAPSHOT_FOLDER}\\{cam_id}_alert_{timestamp}.jpg"
-            cv2.imwrite(filename, frame)
+            # Snapshot save locally
+            filename = f"{cam_id}_alert_{timestamp}.jpg"
+            filepath = f"{SNAPSHOT_FOLDER}\\{filename}"
+            cv2.imwrite(filepath, frame)
 
-            # Supabase — UTC timestamp
+            # Drive pe upload
+            drive_url = upload_to_drive(filepath, filename)
+
+            # Supabase mein save
             try:
                 data = {
                     "camera_id": cam_id,
                     "alert_type": "person_detected",
                     "person_count": count,
-                    "timestamp": now_utc.isoformat()
+                    "timestamp": now_utc.isoformat(),
+                    "snapshot_url": drive_url
                 }
                 supabase.table("alerts").insert(data).execute()
                 print(f"🚨 {cam_id} | {count} person | {now_ist.strftime('%d %b %I:%M %p IST')} | ✅ Saved!")
