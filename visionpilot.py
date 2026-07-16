@@ -38,7 +38,6 @@ def check_update():
         temp_path = "C:\\VisionPilot\\visionpilot_new.py"
         urllib.request.urlretrieve(url, temp_path)
         
-        # Current file size vs new file size
         current_size = os.path.getsize("C:\\VisionPilot\\visionpilot.py")
         new_size = os.path.getsize(temp_path)
         
@@ -60,10 +59,8 @@ def check_update():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("🔥 VisionPilot Starting...")
 
-# Update check
 check_update()
 
-# Config read
 config = read_config()
 DVR_IP = config.get("DVR_IP", "")
 DVR_USER = config.get("DVR_USER", "")
@@ -75,7 +72,6 @@ SUPABASE_KEY = config.get("SUPABASE_KEY", "")
 print(f"📍 DVR: {DVR_IP}")
 print(f"📹 Cameras: {CAMERAS_STR}")
 
-# Camera list
 CAMERAS = [
     {"id": f"CAM{c.strip()}", "channel": int(c.strip())}
     for c in CAMERAS_STR.split(",")
@@ -124,23 +120,27 @@ def process_camera(cam):
         current_time = time.time()
 
         if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
+            
+            # UTC store karo Supabase mein
             now_utc = datetime.now(timezone.utc)
+            # IST sirf print ke liye
+            now_ist = now_utc.astimezone(IST)
             timestamp = now_ist.strftime("%Y%m%d_%H%M%S")
 
             # Snapshot
             filename = f"{SNAPSHOT_FOLDER}\\{cam_id}_alert_{timestamp}.jpg"
             cv2.imwrite(filename, frame)
 
-            # Supabase
+            # Supabase — UTC timestamp
             try:
                 data = {
                     "camera_id": cam_id,
                     "alert_type": "person_detected",
                     "person_count": count,
-                    "timestamp": now_ist.isoformat()
+                    "timestamp": now_utc.isoformat()
                 }
                 supabase.table("alerts").insert(data).execute()
-                print(f"🚨 {cam_id} | {count} person | {now_ist.strftime('%d %b %I:%M %p')} | ✅ Saved!")
+                print(f"🚨 {cam_id} | {count} person | {now_ist.strftime('%d %b %I:%M %p IST')} | ✅ Saved!")
             except Exception as e:
                 print(f"❌ Supabase error: {e}")
 
