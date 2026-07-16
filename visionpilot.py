@@ -54,7 +54,7 @@ def check_update():
 # GOOGLE DRIVE SETUP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CREDENTIALS_FILE = "C:\\VisionPilot\\credentials.json"
-DRIVE_FOLDER_ID = "1sTDvhEBUcA9vmydsFYeIAU4Rt1t-uNvq"
+DRIVE_FOLDER_ID = config.get("DRIVE_FOLDER_ID", "")
 
 def get_drive_service():
     creds = service_account.Credentials.from_service_account_file(
