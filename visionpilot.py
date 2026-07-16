@@ -51,10 +51,9 @@ def check_update():
         print(f"⚠️ Update check failed: {e}")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# GOOGLE DRIVE SETUP
+# GOOGLE DRIVE FUNCTIONS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CREDENTIALS_FILE = "C:\\VisionPilot\\credentials.json"
-DRIVE_FOLDER_ID = config.get("DRIVE_FOLDER_ID", "")
 
 def get_drive_service():
     creds = service_account.Credentials.from_service_account_file(
@@ -63,12 +62,12 @@ def get_drive_service():
     )
     return build("drive", "v3", credentials=creds)
 
-def upload_to_drive(filepath, filename):
+def upload_to_drive(filepath, filename, folder_id):
     try:
         service = get_drive_service()
         file_metadata = {
             "name": filename,
-            "parents": [DRIVE_FOLDER_ID]
+            "parents": [folder_id]
         }
         media = MediaFileUpload(filepath, mimetype="image/jpeg")
         file = service.files().create(
@@ -76,18 +75,16 @@ def upload_to_drive(filepath, filename):
             media_body=media,
             fields="id"
         ).execute()
-
         file_id = file.get("id")
 
-        # Public access do
+        # Public access
         service.permissions().create(
             fileId=file_id,
             body={"type": "anyone", "role": "reader"}
         ).execute()
 
-        # Direct view URL
         public_url = f"https://drive.google.com/uc?id={file_id}"
-        print(f"📸 Drive pe upload: {public_url}")
+        print(f"📸 Drive upload: {public_url}")
         return public_url
 
     except Exception as e:
@@ -107,9 +104,11 @@ DVR_PASS = config.get("DVR_PASS", "")
 CAMERAS_STR = config.get("CAMERAS", "1,2,3,4")
 SUPABASE_URL = config.get("SUPABASE_URL", "")
 SUPABASE_KEY = config.get("SUPABASE_KEY", "")
+DRIVE_FOLDER_ID = config.get("DRIVE_FOLDER_ID", "")
 
 print(f"📍 DVR: {DVR_IP}")
 print(f"📹 Cameras: {CAMERAS_STR}")
+print(f"📁 Drive Folder: {DRIVE_FOLDER_ID}")
 
 CAMERAS = [
     {"id": f"CAM{c.strip()}", "channel": int(c.strip())}
@@ -163,13 +162,15 @@ def process_camera(cam):
             now_ist = now_utc.astimezone(IST)
             timestamp = now_ist.strftime("%Y%m%d_%H%M%S")
 
-            # Snapshot save locally
+            # Snapshot locally save
             filename = f"{cam_id}_alert_{timestamp}.jpg"
             filepath = f"{SNAPSHOT_FOLDER}\\{filename}"
             cv2.imwrite(filepath, frame)
 
             # Drive pe upload
-            drive_url = upload_to_drive(filepath, filename)
+            drive_url = None
+            if DRIVE_FOLDER_ID:
+                drive_url = upload_to_drive(filepath, filename, DRIVE_FOLDER_ID)
 
             # Supabase mein save
             try:
