@@ -124,7 +124,7 @@ def process_camera(cam):
         current_time = time.time()
 
         if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
-            now_ist = datetime.now(IST)
+            now_utc = datetime.now(timezone.utc)
             timestamp = now_ist.strftime("%Y%m%d_%H%M%S")
 
             # Snapshot
