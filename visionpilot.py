@@ -73,14 +73,16 @@ def upload_to_drive(filepath, filename, folder_id):
         file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id"
+            fields="id",
+            supportsAllDrives=True
         ).execute()
         file_id = file.get("id")
 
         # Public access
         service.permissions().create(
             fileId=file_id,
-            body={"type": "anyone", "role": "reader"}
+            body={"type": "anyone", "role": "reader"},
+            supportsAllDrives=True
         ).execute()
 
         public_url = f"https://drive.google.com/uc?id={file_id}"
@@ -108,7 +110,7 @@ DRIVE_FOLDER_ID = config.get("DRIVE_FOLDER_ID", "")
 
 print(f"📍 DVR: {DVR_IP}")
 print(f"📹 Cameras: {CAMERAS_STR}")
-print(f"📁 Drive Folder: {DRIVE_FOLDER_ID}")
+print(f"📁 Drive: {DRIVE_FOLDER_ID}")
 
 CAMERAS = [
     {"id": f"CAM{c.strip()}", "channel": int(c.strip())}
@@ -170,7 +172,9 @@ def process_camera(cam):
             # Drive pe upload
             drive_url = None
             if DRIVE_FOLDER_ID:
-                drive_url = upload_to_drive(filepath, filename, DRIVE_FOLDER_ID)
+                drive_url = upload_to_drive(
+                    filepath, filename, DRIVE_FOLDER_ID
+                )
 
             # Supabase mein save
             try:
