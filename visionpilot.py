@@ -5,10 +5,13 @@ import os
 import time
 import threading
 import urllib.request
+import warnings
 from supabase import create_client
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2 import service_account
+
+warnings.filterwarnings("ignore")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIG.TXT SE READ KARO
@@ -166,8 +169,10 @@ def get_rtsp(channel):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def is_after_hours():
     now = datetime.now(IST).time()
-    start = datetime.strptime(AFTER_HOURS_START[:5], "%H:%M").time()
-    end = datetime.strptime(AFTER_HOURS_END[:5], "%H:%M").time()
+    start = datetime.strptime(
+        AFTER_HOURS_START[:5], "%H:%M").time()
+    end = datetime.strptime(
+        AFTER_HOURS_END[:5], "%H:%M").time()
     if start > end:
         return now >= start or now <= end
     return start <= now <= end
@@ -185,7 +190,8 @@ def save_alert(cam_id, alert_type, count, snapshot_url):
             "snapshot_url": snapshot_url
         }
         supabase.table("alerts").insert(data).execute()
-        print(f"🚨 {cam_id} | {alert_type} | {now_ist.strftime('%d %b %I:%M %p IST')} | ✅ Saved!")
+        print(f"🚨 {cam_id} | {alert_type} | "
+              f"{now_ist.strftime('%d %b %I:%M %p IST')} | ✅ Saved!")
     except Exception as e:
         print(f"❌ Alert save error: {e}")
 
@@ -197,7 +203,9 @@ def take_snapshot_and_upload(frame, cam_id, alert_type):
     cv2.imwrite(filepath, frame)
     drive_url = None
     if DRIVE_FOLDER_ID:
-        drive_url = upload_to_drive(filepath, filename, DRIVE_FOLDER_ID)
+        drive_url = upload_to_drive(
+            filepath, filename, DRIVE_FOLDER_ID
+        )
     return drive_url
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -211,6 +219,7 @@ def process_camera(cam):
     ALERT_COOLDOWN = 30
     BLACKOUT_COOLDOWN = 120
     BLACKOUT_FRAMES = 30
+    BRIGHTNESS_THRESHOLD = 15
 
     last_alert_time = 0
     last_blackout_alert = 0
@@ -231,25 +240,43 @@ def process_camera(cam):
         ret, frame = cap.read()
         current_time = time.time()
 
-        # ━━ CAMERA BLACKOUT
+        # ━━ NO FRAME — CONNECTION LOST
         if not ret:
+            blackout_counter += 1
             if CAMERA_BLACKOUT:
-                blackout_counter += 1
                 if blackout_counter >= BLACKOUT_FRAMES:
                     if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
-                        print(f"⚫ {cam_id} BLACKOUT detected!")
-                        save_alert(cam_id, "camera_blackout", 0, None)
+                        print(f"⚫ {cam_id} CONNECTION LOST!")
+                        save_alert(
+                            cam_id, "camera_blackout", 0, None
+                        )
                         last_blackout_alert = current_time
                         blackout_counter = 0
             cap.release()
             time.sleep(0.1)
             cap = cv2.VideoCapture(rtsp_url)
             continue
-        else:
-            blackout_counter = 0
+
+        # ━━ DARK FRAME — CAMERA COVERED
+        if CAMERA_BLACKOUT:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            brightness = gray.mean()
+
+            if brightness < BRIGHTNESS_THRESHOLD:
+                blackout_counter += 1
+                if blackout_counter >= BLACKOUT_FRAMES:
+                    if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
+                        print(f"⚫ {cam_id} CAMERA COVERED!")
+                        save_alert(
+                            cam_id, "camera_blackout", 0, None
+                        )
+                        last_blackout_alert = current_time
+                        blackout_counter = 0
+            else:
+                blackout_counter = 0
 
         # ━━ PERSON DETECTION
-        if UNIQUE_COUNTING:
+        if UNIQUE_COUNTING or LOITERING:
             results = model_tracker.track(
                 frame,
                 classes=[0],
@@ -257,7 +284,9 @@ def process_camera(cam):
                 verbose=False
             )
         else:
-            results = model(frame, classes=[0], verbose=False)
+            results = model(
+                frame, classes=[0], verbose=False
+            )
 
         count = len(results[0].boxes)
 
@@ -269,7 +298,8 @@ def process_camera(cam):
 
         # ━━ AFTER HOURS
         if AFTER_HOURS and is_after_hours():
-            if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
+            if count > 0 and \
+               (current_time - last_alert_time) > ALERT_COOLDOWN:
                 drive_url = take_snapshot_and_upload(
                     frame, cam_id, "intruder"
                 )
@@ -300,14 +330,13 @@ def process_camera(cam):
                             person_first_seen[tid] = current_time
 
             # Clean old IDs
-            if results[0].boxes.id is not None:
-                active_ids = set(
-                    results[0].boxes.id.int().cpu().tolist()
-                )
-                person_first_seen = {
-                    k: v for k, v in person_first_seen.items()
-                    if k in active_ids
-                }
+            active_ids = set(
+                results[0].boxes.id.int().cpu().tolist()
+            ) if results[0].boxes.id is not None else set()
+            person_first_seen = {
+                k: v for k, v in person_first_seen.items()
+                if k in active_ids
+            }
 
         # ━━ DISPLAY
         cv2.putText(
@@ -330,7 +359,7 @@ def process_camera(cam):
         if AFTER_HOURS and is_after_hours():
             cv2.putText(
                 frame,
-                "⚠ AFTER HOURS MODE",
+                "AFTER HOURS MODE",
                 (10, 90),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8, (0, 0, 255), 2
@@ -348,7 +377,9 @@ print("━━━━━━━━━━━━━━━━━━━━━━━━"
 
 threads = []
 for cam in CAMERAS:
-    t = threading.Thread(target=process_camera, args=(cam,))
+    t = threading.Thread(
+        target=process_camera, args=(cam,)
+    )
     t.daemon = True
     t.start()
     threads.append(t)
