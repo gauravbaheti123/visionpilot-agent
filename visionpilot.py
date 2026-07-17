@@ -218,13 +218,15 @@ def process_camera(cam):
 
     ALERT_COOLDOWN = 30
     BLACKOUT_COOLDOWN = 120
-    BLACKOUT_THRESHOLD = 10  # 10 consecutive failures
+    BLACKOUT_THRESHOLD = 3
+    STARTUP_GRACE = 10  # 10 seconds startup mein ignore
 
     last_alert_time = 0
     last_blackout_alert = 0
     blackout_counter = 0
     person_first_seen = {}
     unique_ids = set()
+    startup_time = time.time()
 
     print(f"📷 {cam_id} Connecting...")
     cap = cv2.VideoCapture(rtsp_url)
@@ -239,23 +241,30 @@ def process_camera(cam):
         ret, frame = cap.read()
         current_time = time.time()
 
-        # ━━ BLACKOUT — CONNECTION LOST
+        # ━━ BLACKOUT DETECTION
         if not ret:
             if CAMERA_BLACKOUT:
-                blackout_counter += 1
-                if blackout_counter >= BLACKOUT_THRESHOLD:
-                    if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
-                        print(f"⚫ {cam_id} BLACKOUT!")
-                        save_alert(
-                            cam_id, "camera_blackout", 0, None
-                        )
-                        last_blackout_alert = current_time
-                        blackout_counter = 0
+                # Startup ke 10 seconds mein ignore karo
+                if (current_time - startup_time) > STARTUP_GRACE:
+                    blackout_counter += 1
+                    print(f"⚠️ {cam_id} No frame! "
+                          f"Counter: {blackout_counter}/{BLACKOUT_THRESHOLD}")
+                    if blackout_counter >= BLACKOUT_THRESHOLD:
+                        if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
+                            print(f"⚫ {cam_id} BLACKOUT DETECTED!")
+                            save_alert(
+                                cam_id, "camera_blackout", 0, None
+                            )
+                            last_blackout_alert = current_time
+                            blackout_counter = 0
             time.sleep(0.5)
             cap.release()
             cap = cv2.VideoCapture(rtsp_url)
             continue
         else:
+            # Good frame aaya — reset counter
+            if blackout_counter > 0:
+                print(f"✅ {cam_id} Back online!")
             blackout_counter = 0
 
         # ━━ PERSON DETECTION
