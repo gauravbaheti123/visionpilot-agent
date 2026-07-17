@@ -120,6 +120,7 @@ os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 model = YOLO("yolov8n.pt")
+model_tracker = YOLO("yolov8n.pt")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # FEATURES FROM SUPABASE
@@ -135,16 +136,15 @@ def get_features():
             print(f"✅ Features loaded!")
             return result.data
         else:
-            print("⚠️ No features found — using defaults")
+            print("⚠️ No features found!")
             return {}
     except Exception as e:
-        print(f"❌ Features load error: {e}")
+        print(f"❌ Features error: {e}")
         return {}
 
 features = get_features()
 print(f"📋 Features: {features}")
 
-# Feature flags
 AFTER_HOURS = features.get("after_hours", False)
 AFTER_HOURS_START = features.get("after_hours_start", "21:00:00")
 AFTER_HOURS_END = features.get("after_hours_end", "09:00:00")
@@ -168,7 +168,7 @@ def is_after_hours():
     now = datetime.now(IST).time()
     start = datetime.strptime(AFTER_HOURS_START[:5], "%H:%M").time()
     end = datetime.strptime(AFTER_HOURS_END[:5], "%H:%M").time()
-    if start > end:  # Overnight (e.g., 21:00 to 09:00)
+    if start > end:
         return now >= start or now <= end
     return start <= now <= end
 
@@ -208,16 +208,14 @@ def process_camera(cam):
     channel = cam["channel"]
     rtsp_url = get_rtsp(channel)
 
-    # Per camera timers
+    ALERT_COOLDOWN = 30
+    BLACKOUT_COOLDOWN = 120
+    BLACKOUT_FRAMES = 30
+
     last_alert_time = 0
     last_blackout_alert = 0
-    ALERT_COOLDOWN = 30
-    BLACKOUT_COOLDOWN = 60
-
-    # Loitering tracker
+    blackout_counter = 0
     person_first_seen = {}
-
-    # Unique counting
     unique_ids = set()
 
     print(f"📷 {cam_id} Connecting...")
@@ -228,35 +226,31 @@ def process_camera(cam):
         return
 
     print(f"✅ {cam_id} Connected!")
-    last_frame_time = time.time()
 
     while True:
         ret, frame = cap.read()
         current_time = time.time()
 
-        # ━━ CAMERA BLACKOUT DETECTION
-        if CAMERA_BLACKOUT:
-            if not ret:
-                if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
-                    print(f"⚫ {cam_id} BLACKOUT detected!")
-                    save_alert(cam_id, "camera_blackout", 0, None)
-                    last_blackout_alert = current_time
-                cap.release()
-                time.sleep(5)
-                cap = cv2.VideoCapture(rtsp_url)
-                continue
-            else:
-                last_frame_time = current_time
-
+        # ━━ CAMERA BLACKOUT
         if not ret:
+            if CAMERA_BLACKOUT:
+                blackout_counter += 1
+                if blackout_counter >= BLACKOUT_FRAMES:
+                    if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
+                        print(f"⚫ {cam_id} BLACKOUT detected!")
+                        save_alert(cam_id, "camera_blackout", 0, None)
+                        last_blackout_alert = current_time
+                        blackout_counter = 0
             cap.release()
-            time.sleep(5)
+            time.sleep(0.1)
             cap = cv2.VideoCapture(rtsp_url)
             continue
+        else:
+            blackout_counter = 0
 
         # ━━ PERSON DETECTION
         if UNIQUE_COUNTING:
-            results = model.track(
+            results = model_tracker.track(
                 frame,
                 classes=[0],
                 persist=True,
@@ -273,16 +267,19 @@ def process_camera(cam):
             for tid in track_ids:
                 unique_ids.add(tid)
 
-        # ━━ AFTER HOURS DETECTION
+        # ━━ AFTER HOURS
         if AFTER_HOURS and is_after_hours():
             if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
                 drive_url = take_snapshot_and_upload(
                     frame, cam_id, "intruder"
                 )
-                save_alert(cam_id, "after_hours_intruder", count, drive_url)
+                save_alert(
+                    cam_id, "after_hours_intruder",
+                    count, drive_url
+                )
                 last_alert_time = current_time
 
-        # ━━ LOITERING DETECTION
+        # ━━ LOITERING
         if LOITERING and results[0].boxes.id is not None:
             track_ids = results[0].boxes.id.int().cpu().tolist()
             for tid in track_ids:
@@ -302,27 +299,42 @@ def process_camera(cam):
                             last_alert_time = current_time
                             person_first_seen[tid] = current_time
 
-            # Clean up old IDs
-            active_ids = set(track_ids) if results[0].boxes.id is not None else set()
-            person_first_seen = {
-                k: v for k, v in person_first_seen.items()
-                if k in active_ids
-            }
+            # Clean old IDs
+            if results[0].boxes.id is not None:
+                active_ids = set(
+                    results[0].boxes.id.int().cpu().tolist()
+                )
+                person_first_seen = {
+                    k: v for k, v in person_first_seen.items()
+                    if k in active_ids
+                }
 
         # ━━ DISPLAY
-        cv2.putText(frame, f"{cam_id} | People: {count}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8, (0, 255, 0), 2)
+        cv2.putText(
+            frame,
+            f"{cam_id} | People: {count}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8, (0, 255, 0), 2
+        )
 
         if UNIQUE_COUNTING:
-            cv2.putText(frame, f"Unique: {len(unique_ids)}",
-                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8, (255, 255, 0), 2)
+            cv2.putText(
+                frame,
+                f"Unique Today: {len(unique_ids)}",
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (255, 255, 0), 2
+            )
 
         if AFTER_HOURS and is_after_hours():
-            cv2.putText(frame, "⚠️ AFTER HOURS",
-                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8, (0, 0, 255), 2)
+            cv2.putText(
+                frame,
+                "⚠ AFTER HOURS MODE",
+                (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (0, 0, 255), 2
+            )
 
         cv2.imshow(f"VisionPilot - {cam_id}", frame)
 
