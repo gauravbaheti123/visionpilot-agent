@@ -51,7 +51,7 @@ def check_update():
         print(f"⚠️ Update check failed: {e}")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# GOOGLE DRIVE FUNCTIONS
+# GOOGLE DRIVE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CREDENTIALS_FILE = "C:\\VisionPilot\\credentials.json"
 
@@ -77,18 +77,14 @@ def upload_to_drive(filepath, filename, folder_id):
             supportsAllDrives=True
         ).execute()
         file_id = file.get("id")
-
-        # Public access
         service.permissions().create(
             fileId=file_id,
             body={"type": "anyone", "role": "reader"},
             supportsAllDrives=True
         ).execute()
-
         public_url = f"https://drive.google.com/uc?id={file_id}"
         print(f"📸 Drive upload: {public_url}")
         return public_url
-
     except Exception as e:
         print(f"❌ Drive upload error: {e}")
         return None
@@ -107,10 +103,11 @@ CAMERAS_STR = config.get("CAMERAS", "1,2,3,4")
 SUPABASE_URL = config.get("SUPABASE_URL", "")
 SUPABASE_KEY = config.get("SUPABASE_KEY", "")
 DRIVE_FOLDER_ID = config.get("DRIVE_FOLDER_ID", "")
+CLIENT_ID = config.get("CLIENT_ID", "")
 
 print(f"📍 DVR: {DVR_IP}")
 print(f"📹 Cameras: {CAMERAS_STR}")
-print(f"📁 Drive: {DRIVE_FOLDER_ID}")
+print(f"👤 Client: {CLIENT_ID}")
 
 CAMERAS = [
     {"id": f"CAM{c.strip()}", "channel": int(c.strip())}
@@ -118,15 +115,90 @@ CAMERAS = [
 ]
 
 IST = timezone(timedelta(hours=5, minutes=30))
-ALERT_COOLDOWN = 30
 SNAPSHOT_FOLDER = "C:\\VisionPilot\\snapshots"
-
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
-model = YOLO("yolov8n.pt")
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+model = YOLO("yolov8n.pt")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FEATURES FROM SUPABASE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def get_features():
+    try:
+        result = supabase.table("client_features")\
+            .select("*")\
+            .eq("client_id", CLIENT_ID)\
+            .single()\
+            .execute()
+        if result.data:
+            print(f"✅ Features loaded!")
+            return result.data
+        else:
+            print("⚠️ No features found — using defaults")
+            return {}
+    except Exception as e:
+        print(f"❌ Features load error: {e}")
+        return {}
+
+features = get_features()
+print(f"📋 Features: {features}")
+
+# Feature flags
+AFTER_HOURS = features.get("after_hours", False)
+AFTER_HOURS_START = features.get("after_hours_start", "21:00:00")
+AFTER_HOURS_END = features.get("after_hours_end", "09:00:00")
+LOITERING = features.get("loitering", False)
+LOITERING_THRESHOLD = features.get("loitering_threshold", 30)
+CAMERA_BLACKOUT = features.get("camera_blackout", False)
+UNIQUE_COUNTING = features.get("unique_counting", False)
+
+print(f"⏰ After Hours: {AFTER_HOURS} ({AFTER_HOURS_START} - {AFTER_HOURS_END})")
+print(f"🚶 Loitering: {LOITERING} ({LOITERING_THRESHOLD}s)")
+print(f"📷 Blackout: {CAMERA_BLACKOUT}")
+print(f"👥 Unique Count: {UNIQUE_COUNTING}")
 
 def get_rtsp(channel):
     return f"rtsp://{DVR_USER}:{DVR_PASS}@{DVR_IP}:554/cam/realmonitor?channel={channel}&subtype=1"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# HELPER FUNCTIONS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def is_after_hours():
+    now = datetime.now(IST).time()
+    start = datetime.strptime(AFTER_HOURS_START[:5], "%H:%M").time()
+    end = datetime.strptime(AFTER_HOURS_END[:5], "%H:%M").time()
+    if start > end:  # Overnight (e.g., 21:00 to 09:00)
+        return now >= start or now <= end
+    return start <= now <= end
+
+def save_alert(cam_id, alert_type, count, snapshot_url):
+    try:
+        now_utc = datetime.now(timezone.utc)
+        now_ist = now_utc.astimezone(IST)
+        data = {
+            "client_id": CLIENT_ID,
+            "camera_id": cam_id,
+            "alert_type": alert_type,
+            "person_count": count,
+            "timestamp": now_utc.isoformat(),
+            "snapshot_url": snapshot_url
+        }
+        supabase.table("alerts").insert(data).execute()
+        print(f"🚨 {cam_id} | {alert_type} | {now_ist.strftime('%d %b %I:%M %p IST')} | ✅ Saved!")
+    except Exception as e:
+        print(f"❌ Alert save error: {e}")
+
+def take_snapshot_and_upload(frame, cam_id, alert_type):
+    now_ist = datetime.now(IST)
+    timestamp = now_ist.strftime("%Y%m%d_%H%M%S")
+    filename = f"{cam_id}_{alert_type}_{timestamp}.jpg"
+    filepath = f"{SNAPSHOT_FOLDER}\\{filename}"
+    cv2.imwrite(filepath, frame)
+    drive_url = None
+    if DRIVE_FOLDER_ID:
+        drive_url = upload_to_drive(filepath, filename, DRIVE_FOLDER_ID)
+    return drive_url
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CAMERA THREAD
@@ -135,62 +207,122 @@ def process_camera(cam):
     cam_id = cam["id"]
     channel = cam["channel"]
     rtsp_url = get_rtsp(channel)
+
+    # Per camera timers
     last_alert_time = 0
+    last_blackout_alert = 0
+    ALERT_COOLDOWN = 30
+    BLACKOUT_COOLDOWN = 60
+
+    # Loitering tracker
+    person_first_seen = {}
+
+    # Unique counting
+    unique_ids = set()
 
     print(f"📷 {cam_id} Connecting...")
     cap = cv2.VideoCapture(rtsp_url)
 
     if not cap.isOpened():
-        print(f"❌ {cam_id} Failed to connect!")
+        print(f"❌ {cam_id} Failed!")
         return
 
     print(f"✅ {cam_id} Connected!")
+    last_frame_time = time.time()
 
     while True:
         ret, frame = cap.read()
+        current_time = time.time()
+
+        # ━━ CAMERA BLACKOUT DETECTION
+        if CAMERA_BLACKOUT:
+            if not ret:
+                if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
+                    print(f"⚫ {cam_id} BLACKOUT detected!")
+                    save_alert(cam_id, "camera_blackout", 0, None)
+                    last_blackout_alert = current_time
+                cap.release()
+                time.sleep(5)
+                cap = cv2.VideoCapture(rtsp_url)
+                continue
+            else:
+                last_frame_time = current_time
+
         if not ret:
-            print(f"⚠️ {cam_id} Reconnecting...")
             cap.release()
             time.sleep(5)
             cap = cv2.VideoCapture(rtsp_url)
             continue
 
-        results = model(frame, classes=[0], verbose=False)
+        # ━━ PERSON DETECTION
+        if UNIQUE_COUNTING:
+            results = model.track(
+                frame,
+                classes=[0],
+                persist=True,
+                verbose=False
+            )
+        else:
+            results = model(frame, classes=[0], verbose=False)
+
         count = len(results[0].boxes)
-        current_time = time.time()
 
-        if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
-            now_utc = datetime.now(timezone.utc)
-            now_ist = now_utc.astimezone(IST)
-            timestamp = now_ist.strftime("%Y%m%d_%H%M%S")
+        # ━━ UNIQUE COUNTING
+        if UNIQUE_COUNTING and results[0].boxes.id is not None:
+            track_ids = results[0].boxes.id.int().cpu().tolist()
+            for tid in track_ids:
+                unique_ids.add(tid)
 
-            # Snapshot locally save
-            filename = f"{cam_id}_alert_{timestamp}.jpg"
-            filepath = f"{SNAPSHOT_FOLDER}\\{filename}"
-            cv2.imwrite(filepath, frame)
-
-            # Drive pe upload
-            drive_url = None
-            if DRIVE_FOLDER_ID:
-                drive_url = upload_to_drive(
-                    filepath, filename, DRIVE_FOLDER_ID
+        # ━━ AFTER HOURS DETECTION
+        if AFTER_HOURS and is_after_hours():
+            if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
+                drive_url = take_snapshot_and_upload(
+                    frame, cam_id, "intruder"
                 )
+                save_alert(cam_id, "after_hours_intruder", count, drive_url)
+                last_alert_time = current_time
 
-            # Supabase mein save
-            try:
-                data = {
-                    "camera_id": cam_id,
-                    "alert_type": "person_detected",
-                    "person_count": count,
-                    "timestamp": now_utc.isoformat(),
-                    "snapshot_url": drive_url
-                }
-                supabase.table("alerts").insert(data).execute()
-                print(f"🚨 {cam_id} | {count} person | {now_ist.strftime('%d %b %I:%M %p IST')} | ✅ Saved!")
-            except Exception as e:
-                print(f"❌ Supabase error: {e}")
+        # ━━ LOITERING DETECTION
+        if LOITERING and results[0].boxes.id is not None:
+            track_ids = results[0].boxes.id.int().cpu().tolist()
+            for tid in track_ids:
+                if tid not in person_first_seen:
+                    person_first_seen[tid] = current_time
+                else:
+                    duration = current_time - person_first_seen[tid]
+                    if duration > LOITERING_THRESHOLD:
+                        if (current_time - last_alert_time) > ALERT_COOLDOWN:
+                            drive_url = take_snapshot_and_upload(
+                                frame, cam_id, "loitering"
+                            )
+                            save_alert(
+                                cam_id, "loitering_detected",
+                                1, drive_url
+                            )
+                            last_alert_time = current_time
+                            person_first_seen[tid] = current_time
 
-            last_alert_time = current_time
+            # Clean up old IDs
+            active_ids = set(track_ids) if results[0].boxes.id is not None else set()
+            person_first_seen = {
+                k: v for k, v in person_first_seen.items()
+                if k in active_ids
+            }
+
+        # ━━ DISPLAY
+        cv2.putText(frame, f"{cam_id} | People: {count}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (0, 255, 0), 2)
+
+        if UNIQUE_COUNTING:
+            cv2.putText(frame, f"Unique: {len(unique_ids)}",
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8, (255, 255, 0), 2)
+
+        if AFTER_HOURS and is_after_hours():
+            cv2.putText(frame, "⚠️ AFTER HOURS",
+                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8, (0, 0, 255), 2)
 
         cv2.imshow(f"VisionPilot - {cam_id}", frame)
 
@@ -200,6 +332,7 @@ def process_camera(cam):
 # MAIN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print(f"📹 {len(CAMERAS)} cameras starting...")
+print("━━━━━━━━━━━━━━━━━━━━━━━━")
 
 threads = []
 for cam in CAMERAS:
