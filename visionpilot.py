@@ -219,13 +219,13 @@ def process_camera(cam):
     ALERT_COOLDOWN = 30
     BLACKOUT_COOLDOWN = 120
     BLACKOUT_FRAMES = 30
-    BRIGHTNESS_THRESHOLD = 15
 
     last_alert_time = 0
     last_blackout_alert = 0
     blackout_counter = 0
     person_first_seen = {}
     unique_ids = set()
+    brightness_log_counter = 0
 
     print(f"📷 {cam_id} Connecting...")
     cap = cv2.VideoCapture(rtsp_url)
@@ -240,16 +240,14 @@ def process_camera(cam):
         ret, frame = cap.read()
         current_time = time.time()
 
-        # ━━ NO FRAME — CONNECTION LOST
+        # ━━ NO FRAME
         if not ret:
             blackout_counter += 1
             if CAMERA_BLACKOUT:
                 if blackout_counter >= BLACKOUT_FRAMES:
                     if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
                         print(f"⚫ {cam_id} CONNECTION LOST!")
-                        save_alert(
-                            cam_id, "camera_blackout", 0, None
-                        )
+                        save_alert(cam_id, "camera_blackout", 0, None)
                         last_blackout_alert = current_time
                         blackout_counter = 0
             cap.release()
@@ -257,22 +255,32 @@ def process_camera(cam):
             cap = cv2.VideoCapture(rtsp_url)
             continue
 
-        # ━━ DARK FRAME — CAMERA COVERED
+        # ━━ BRIGHTNESS CHECK + DEBUG
         if CAMERA_BLACKOUT:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             brightness = gray.mean()
 
-            if brightness < BRIGHTNESS_THRESHOLD:
+            # Har 50 frames mein brightness print karo
+            brightness_log_counter += 1
+            if brightness_log_counter >= 50:
+                print(f"💡 {cam_id} Brightness: {brightness:.1f}")
+                brightness_log_counter = 0
+
+            if brightness < 30:
                 blackout_counter += 1
+                print(f"🌑 {cam_id} Dark frame! "
+                      f"Brightness: {brightness:.1f} "
+                      f"Counter: {blackout_counter}/{BLACKOUT_FRAMES}")
                 if blackout_counter >= BLACKOUT_FRAMES:
                     if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
                         print(f"⚫ {cam_id} CAMERA COVERED!")
-                        save_alert(
-                            cam_id, "camera_blackout", 0, None
-                        )
+                        save_alert(cam_id, "camera_blackout", 0, None)
                         last_blackout_alert = current_time
                         blackout_counter = 0
             else:
+                if blackout_counter > 0:
+                    print(f"☀️ {cam_id} Back to normal! "
+                          f"Brightness: {brightness:.1f}")
                 blackout_counter = 0
 
         # ━━ PERSON DETECTION
@@ -284,9 +292,7 @@ def process_camera(cam):
                 verbose=False
             )
         else:
-            results = model(
-                frame, classes=[0], verbose=False
-            )
+            results = model(frame, classes=[0], verbose=False)
 
         count = len(results[0].boxes)
 
@@ -329,7 +335,6 @@ def process_camera(cam):
                             last_alert_time = current_time
                             person_first_seen[tid] = current_time
 
-            # Clean old IDs
             active_ids = set(
                 results[0].boxes.id.int().cpu().tolist()
             ) if results[0].boxes.id is not None else set()
