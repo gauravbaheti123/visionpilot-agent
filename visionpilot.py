@@ -13,9 +13,6 @@ from google.oauth2 import service_account
 
 warnings.filterwarnings("ignore")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CONFIG.TXT SE READ KARO
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def read_config():
     config = {}
     config_path = "C:\\VisionPilot\\config.txt"
@@ -30,9 +27,6 @@ def read_config():
                 config[key.strip()] = value.strip()
     return config
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# AUTO UPDATER
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def check_update():
     try:
         print("🔄 Checking for updates...")
@@ -53,9 +47,6 @@ def check_update():
     except Exception as e:
         print(f"⚠️ Update check failed: {e}")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# GOOGLE DRIVE
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CREDENTIALS_FILE = "C:\\VisionPilot\\credentials.json"
 
 def get_drive_service():
@@ -92,9 +83,6 @@ def upload_to_drive(filepath, filename, folder_id):
         print(f"❌ Drive upload error: {e}")
         return None
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SETUP
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("🔥 VisionPilot Starting...")
 check_update()
 
@@ -125,9 +113,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 model = YOLO("yolov8n.pt")
 model_tracker = YOLO("yolov8n.pt")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# FEATURES FROM SUPABASE
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_features():
     try:
         result = supabase.table("client_features")\
@@ -153,26 +138,19 @@ AFTER_HOURS_START = features.get("after_hours_start", "21:00:00")
 AFTER_HOURS_END = features.get("after_hours_end", "09:00:00")
 LOITERING = features.get("loitering", False)
 LOITERING_THRESHOLD = features.get("loitering_threshold", 30)
-CAMERA_BLACKOUT = features.get("camera_blackout", False)
 UNIQUE_COUNTING = features.get("unique_counting", False)
 
 print(f"⏰ After Hours: {AFTER_HOURS} ({AFTER_HOURS_START} - {AFTER_HOURS_END})")
 print(f"🚶 Loitering: {LOITERING} ({LOITERING_THRESHOLD}s)")
-print(f"📷 Blackout: {CAMERA_BLACKOUT}")
 print(f"👥 Unique Count: {UNIQUE_COUNTING}")
 
 def get_rtsp(channel):
     return f"rtsp://{DVR_USER}:{DVR_PASS}@{DVR_IP}:554/cam/realmonitor?channel={channel}&subtype=1"
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# HELPER FUNCTIONS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def is_after_hours():
     now = datetime.now(IST).time()
-    start = datetime.strptime(
-        AFTER_HOURS_START[:5], "%H:%M").time()
-    end = datetime.strptime(
-        AFTER_HOURS_END[:5], "%H:%M").time()
+    start = datetime.strptime(AFTER_HOURS_START[:5], "%H:%M").time()
+    end = datetime.strptime(AFTER_HOURS_END[:5], "%H:%M").time()
     if start > end:
         return now >= start or now <= end
     return start <= now <= end
@@ -195,6 +173,21 @@ def save_alert(cam_id, alert_type, count, snapshot_url):
     except Exception as e:
         print(f"❌ Alert save error: {e}")
 
+def save_unique_count(cam_id, count):
+    try:
+        now_utc = datetime.now(timezone.utc)
+        data = {
+            "client_id": CLIENT_ID,
+            "camera_id": cam_id,
+            "count": count,
+            "timestamp": now_utc.isoformat(),
+            "date": datetime.now(IST).date().isoformat()
+        }
+        supabase.table("unique_counts").insert(data).execute()
+        print(f"👥 {cam_id} | Unique Count: {count} | Saved!")
+    except Exception as e:
+        print(f"❌ Unique count save error: {e}")
+
 def take_snapshot_and_upload(frame, cam_id, alert_type):
     now_ist = datetime.now(IST)
     timestamp = now_ist.strftime("%Y%m%d_%H%M%S")
@@ -203,30 +196,20 @@ def take_snapshot_and_upload(frame, cam_id, alert_type):
     cv2.imwrite(filepath, frame)
     drive_url = None
     if DRIVE_FOLDER_ID:
-        drive_url = upload_to_drive(
-            filepath, filename, DRIVE_FOLDER_ID
-        )
+        drive_url = upload_to_drive(filepath, filename, DRIVE_FOLDER_ID)
     return drive_url
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CAMERA THREAD
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def process_camera(cam):
     cam_id = cam["id"]
     channel = cam["channel"]
     rtsp_url = get_rtsp(channel)
 
     ALERT_COOLDOWN = 30
-    BLACKOUT_COOLDOWN = 120
-    BLACKOUT_THRESHOLD = 3
-    STARTUP_GRACE = 10  # 10 seconds startup mein ignore
-
     last_alert_time = 0
-    last_blackout_alert = 0
-    blackout_counter = 0
     person_first_seen = {}
     unique_ids = set()
-    startup_time = time.time()
+    last_unique_save = time.time()
+    UNIQUE_SAVE_INTERVAL = 300  # Har 5 min mein save
 
     print(f"📷 {cam_id} Connecting...")
     cap = cv2.VideoCapture(rtsp_url)
@@ -241,31 +224,11 @@ def process_camera(cam):
         ret, frame = cap.read()
         current_time = time.time()
 
-        # ━━ BLACKOUT DETECTION
         if not ret:
-            if CAMERA_BLACKOUT:
-                # Startup ke 10 seconds mein ignore karo
-                if (current_time - startup_time) > STARTUP_GRACE:
-                    blackout_counter += 1
-                    print(f"⚠️ {cam_id} No frame! "
-                          f"Counter: {blackout_counter}/{BLACKOUT_THRESHOLD}")
-                    if blackout_counter >= BLACKOUT_THRESHOLD:
-                        if (current_time - last_blackout_alert) > BLACKOUT_COOLDOWN:
-                            print(f"⚫ {cam_id} BLACKOUT DETECTED!")
-                            save_alert(
-                                cam_id, "camera_blackout", 0, None
-                            )
-                            last_blackout_alert = current_time
-                            blackout_counter = 0
-            time.sleep(0.5)
             cap.release()
+            time.sleep(1)
             cap = cv2.VideoCapture(rtsp_url)
             continue
-        else:
-            # Good frame aaya — reset counter
-            if blackout_counter > 0:
-                print(f"✅ {cam_id} Back online!")
-            blackout_counter = 0
 
         # ━━ PERSON DETECTION
         if UNIQUE_COUNTING or LOITERING:
@@ -285,6 +248,11 @@ def process_camera(cam):
             track_ids = results[0].boxes.id.int().cpu().tolist()
             for tid in track_ids:
                 unique_ids.add(tid)
+
+            # Har 5 min mein Supabase pe save
+            if (current_time - last_unique_save) > UNIQUE_SAVE_INTERVAL:
+                save_unique_count(cam_id, len(unique_ids))
+                last_unique_save = current_time
 
         # ━━ AFTER HOURS
         if AFTER_HOURS and is_after_hours():
@@ -328,47 +296,31 @@ def process_camera(cam):
             }
 
         # ━━ DISPLAY
-        cv2.putText(
-            frame,
-            f"{cam_id} | People: {count}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8, (0, 255, 0), 2
-        )
+        cv2.putText(frame, f"{cam_id} | People: {count}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (0, 255, 0), 2)
 
         if UNIQUE_COUNTING:
-            cv2.putText(
-                frame,
-                f"Unique Today: {len(unique_ids)}",
-                (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8, (255, 255, 0), 2
-            )
+            cv2.putText(frame,
+                        f"Unique Today: {len(unique_ids)}",
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8, (255, 255, 0), 2)
 
         if AFTER_HOURS and is_after_hours():
-            cv2.putText(
-                frame,
-                "AFTER HOURS MODE",
-                (10, 90),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8, (0, 0, 255), 2
-            )
+            cv2.putText(frame, "AFTER HOURS MODE",
+                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8, (0, 0, 255), 2)
 
         cv2.imshow(f"VisionPilot - {cam_id}", frame)
 
     cap.release()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MAIN
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print(f"📹 {len(CAMERAS)} cameras starting...")
 print("━━━━━━━━━━━━━━━━━━━━━━━━")
 
 threads = []
 for cam in CAMERAS:
-    t = threading.Thread(
-        target=process_camera, args=(cam,)
-    )
+    t = threading.Thread(target=process_camera, args=(cam,))
     t.daemon = True
     t.start()
     threads.append(t)
