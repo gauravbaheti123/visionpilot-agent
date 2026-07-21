@@ -122,7 +122,7 @@ SNAPSHOT_FOLDER = "C:\\VisionPilot\\snapshots"
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-model = YOLO("yolov8n.pt")  # Detection only
+model = YOLO("yolov8n.pt")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # FEATURES — GLOBAL + LOCK
@@ -159,13 +159,13 @@ def refresh_features():
     while True:
         time.sleep(120)
         try:
+            global AFTER_HOURS, AFTER_HOURS_START, AFTER_HOURS_END, UNIQUE_COUNTING
             result = supabase.table("client_features")\
                 .select("*")\
                 .eq("client_id", CLIENT_ID)\
                 .single()\
                 .execute()
             if result.data:
-                global AFTER_HOURS, AFTER_HOURS_START, AFTER_HOURS_END, UNIQUE_COUNTING
                 with features_lock:
                     AFTER_HOURS = result.data.get("after_hours", False)
                     AFTER_HOURS_START = result.data.get("after_hours_start", "21:00:00")
@@ -183,7 +183,8 @@ load_features()
 # HELPERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_rtsp(channel):
-    return f"rtsp://{DVR_USER}:{DVR_PASS}@{DVR_IP}:554/cam/realmonitor?channel={channel}&subtype=1"
+    # subtype=0 = Main HD stream (better tracking)
+    return f"rtsp://{DVR_USER}:{DVR_PASS}@{DVR_IP}:554/cam/realmonitor?channel={channel}&subtype=0"
 
 def is_after_hours():
     with features_lock:
@@ -248,7 +249,7 @@ def process_camera(cam):
     channel = cam["channel"]
     rtsp_url = get_rtsp(channel)
 
-    # ⭐ Har camera ka APNA tracker model
+    # Har camera ka apna tracker
     cam_tracker = YOLO("yolov8n.pt")
 
     ALERT_COOLDOWN = 300
@@ -286,6 +287,7 @@ def process_camera(cam):
                 frame,
                 classes=[0],
                 persist=True,
+                tracker="bytetrack.yaml",
                 verbose=False
             )
         else:
@@ -302,7 +304,8 @@ def process_camera(cam):
                 print(f"👁️ {cam_id} | IDs: {track_ids} | "
                       f"Unique: {len(unique_ids)}")
             else:
-                print(f"⚠️ {cam_id} | No IDs | People: {count}")
+                if count > 0:
+                    print(f"⚠️ {cam_id} | No IDs | People: {count}")
 
             if (current_time - last_unique_save) > UNIQUE_SAVE_INTERVAL:
                 if len(unique_ids) > 0:
