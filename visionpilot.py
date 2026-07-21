@@ -13,6 +13,9 @@ from google.oauth2 import service_account
 
 warnings.filterwarnings("ignore")
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CONFIG
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def read_config():
     config = {}
     config_path = "C:\\VisionPilot\\config.txt"
@@ -27,6 +30,9 @@ def read_config():
                 config[key.strip()] = value.strip()
     return config
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# AUTO UPDATER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def check_update():
     try:
         print("🔄 Checking for updates...")
@@ -47,6 +53,9 @@ def check_update():
     except Exception as e:
         print(f"⚠️ Update check failed: {e}")
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# GOOGLE DRIVE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CREDENTIALS_FILE = "C:\\VisionPilot\\credentials.json"
 
 def get_drive_service():
@@ -83,6 +92,9 @@ def upload_to_drive(filepath, filename, folder_id):
         print(f"❌ Drive upload error: {e}")
         return None
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SETUP
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("🔥 VisionPilot Starting...")
 check_update()
 
@@ -110,10 +122,19 @@ SNAPSHOT_FOLDER = "C:\\VisionPilot\\snapshots"
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-model = YOLO("yolov8n.pt")
-model_tracker = YOLO("yolov8n.pt")
+model = YOLO("yolov8n.pt")  # Detection only
 
-def get_features():
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FEATURES — GLOBAL + LOCK
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+features_lock = threading.Lock()
+AFTER_HOURS = False
+AFTER_HOURS_START = "21:00:00"
+AFTER_HOURS_END = "09:00:00"
+UNIQUE_COUNTING = False
+
+def load_features():
+    global AFTER_HOURS, AFTER_HOURS_START, AFTER_HOURS_END, UNIQUE_COUNTING
     try:
         result = supabase.table("client_features")\
             .select("*")\
@@ -121,33 +142,56 @@ def get_features():
             .single()\
             .execute()
         if result.data:
+            with features_lock:
+                AFTER_HOURS = result.data.get("after_hours", False)
+                AFTER_HOURS_START = result.data.get("after_hours_start", "21:00:00")
+                AFTER_HOURS_END = result.data.get("after_hours_end", "09:00:00")
+                UNIQUE_COUNTING = result.data.get("unique_counting", False)
             print(f"✅ Features loaded!")
-            return result.data
+            print(f"⏰ After Hours: {AFTER_HOURS} ({AFTER_HOURS_START} - {AFTER_HOURS_END})")
+            print(f"👥 Unique Count: {UNIQUE_COUNTING}")
         else:
             print("⚠️ No features found!")
-            return {}
     except Exception as e:
         print(f"❌ Features error: {e}")
-        return {}
 
-features = get_features()
-print(f"📋 Features: {features}")
+def refresh_features():
+    while True:
+        time.sleep(120)
+        try:
+            result = supabase.table("client_features")\
+                .select("*")\
+                .eq("client_id", CLIENT_ID)\
+                .single()\
+                .execute()
+            if result.data:
+                global AFTER_HOURS, AFTER_HOURS_START, AFTER_HOURS_END, UNIQUE_COUNTING
+                with features_lock:
+                    AFTER_HOURS = result.data.get("after_hours", False)
+                    AFTER_HOURS_START = result.data.get("after_hours_start", "21:00:00")
+                    AFTER_HOURS_END = result.data.get("after_hours_end", "09:00:00")
+                    UNIQUE_COUNTING = result.data.get("unique_counting", False)
+                print(f"🔄 Features refreshed! "
+                      f"After Hours: {AFTER_HOURS} "
+                      f"({AFTER_HOURS_START}-{AFTER_HOURS_END})")
+        except Exception as e:
+            print(f"⚠️ Refresh error: {e}")
 
-AFTER_HOURS = features.get("after_hours", False)
-AFTER_HOURS_START = features.get("after_hours_start", "21:00:00")
-AFTER_HOURS_END = features.get("after_hours_end", "09:00:00")
-UNIQUE_COUNTING = features.get("unique_counting", False)
+load_features()
 
-print(f"⏰ After Hours: {AFTER_HOURS} ({AFTER_HOURS_START} - {AFTER_HOURS_END})")
-print(f"👥 Unique Count: {UNIQUE_COUNTING}")
-
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# HELPERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_rtsp(channel):
     return f"rtsp://{DVR_USER}:{DVR_PASS}@{DVR_IP}:554/cam/realmonitor?channel={channel}&subtype=1"
 
 def is_after_hours():
+    with features_lock:
+        start_str = AFTER_HOURS_START
+        end_str = AFTER_HOURS_END
     now = datetime.now(IST).time()
-    start = datetime.strptime(AFTER_HOURS_START[:5], "%H:%M").time()
-    end = datetime.strptime(AFTER_HOURS_END[:5], "%H:%M").time()
+    start = datetime.strptime(start_str[:5], "%H:%M").time()
+    end = datetime.strptime(end_str[:5], "%H:%M").time()
     if start > end:
         return now >= start or now <= end
     return start <= now <= end
@@ -196,13 +240,19 @@ def take_snapshot_and_upload(frame, cam_id, alert_type):
         drive_url = upload_to_drive(filepath, filename, DRIVE_FOLDER_ID)
     return drive_url
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CAMERA THREAD
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def process_camera(cam):
     cam_id = cam["id"]
     channel = cam["channel"]
     rtsp_url = get_rtsp(channel)
 
-    ALERT_COOLDOWN = 300  # 5 min per camera
-    UNIQUE_SAVE_INTERVAL = 60  # 1 min mein save
+    # ⭐ Har camera ka APNA tracker model
+    cam_tracker = YOLO("yolov8n.pt")
+
+    ALERT_COOLDOWN = 300
+    UNIQUE_SAVE_INTERVAL = 60
     last_alert_time = 0
     last_unique_save = time.time()
     unique_ids = set()
@@ -226,9 +276,13 @@ def process_camera(cam):
             cap = cv2.VideoCapture(rtsp_url)
             continue
 
-        # ━━ DETECTION — always use tracker for unique counting
-        if UNIQUE_COUNTING:
-            results = model_tracker.track(
+        with features_lock:
+            after_hours = AFTER_HOURS
+            unique_counting = UNIQUE_COUNTING
+
+        # ━━ DETECTION
+        if unique_counting:
+            results = cam_tracker.track(
                 frame,
                 classes=[0],
                 persist=True,
@@ -240,28 +294,34 @@ def process_camera(cam):
         count = len(results[0].boxes)
 
         # ━━ UNIQUE COUNTING
-        if UNIQUE_COUNTING:
+        if unique_counting:
             if results[0].boxes.id is not None:
                 track_ids = results[0].boxes.id.int().cpu().tolist()
                 for tid in track_ids:
                     unique_ids.add(tid)
-                print(f"👁️ {cam_id} | Tracking: {track_ids} | Unique total: {len(unique_ids)}")
+                print(f"👁️ {cam_id} | IDs: {track_ids} | "
+                      f"Unique: {len(unique_ids)}")
             else:
-                print(f"⚠️ {cam_id} | No tracking IDs | People: {count}")
+                print(f"⚠️ {cam_id} | No IDs | People: {count}")
 
-            # Har 1 min mein save
             if (current_time - last_unique_save) > UNIQUE_SAVE_INTERVAL:
                 if len(unique_ids) > 0:
                     save_unique_count(cam_id, len(unique_ids))
                 else:
-                    print(f"⏭️ {cam_id} | Unique count 0 — skip save")
+                    print(f"⏭️ {cam_id} | Unique 0 — skip")
                 last_unique_save = current_time
 
         # ━━ AFTER HOURS
-        if AFTER_HOURS and is_after_hours():
-            if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
-                drive_url = take_snapshot_and_upload(frame, cam_id, "intruder")
-                save_alert(cam_id, "after_hours_intruder", count, drive_url)
+        if after_hours and is_after_hours():
+            if count > 0 and \
+               (current_time - last_alert_time) > ALERT_COOLDOWN:
+                drive_url = take_snapshot_and_upload(
+                    frame, cam_id, "intruder"
+                )
+                save_alert(
+                    cam_id, "after_hours_intruder",
+                    count, drive_url
+                )
                 last_alert_time = current_time
 
         # ━━ DISPLAY
@@ -269,12 +329,13 @@ def process_camera(cam):
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                     0.8, (0, 255, 0), 2)
 
-        if UNIQUE_COUNTING:
-            cv2.putText(frame, f"Unique Today: {len(unique_ids)}",
+        if unique_counting:
+            cv2.putText(frame,
+                        f"Unique Today: {len(unique_ids)}",
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (255, 255, 0), 2)
 
-        if AFTER_HOURS and is_after_hours():
+        if after_hours and is_after_hours():
             cv2.putText(frame, "AFTER HOURS MODE",
                         (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (0, 0, 255), 2)
@@ -283,8 +344,16 @@ def process_camera(cam):
 
     cap.release()
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MAIN
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print(f"📹 {len(CAMERAS)} cameras starting...")
 print("━━━━━━━━━━━━━━━━━━━━━━━━")
+
+refresh_thread = threading.Thread(target=refresh_features)
+refresh_thread.daemon = True
+refresh_thread.start()
+print("🔄 Auto refresh: every 2 min")
 
 threads = []
 for cam in CAMERAS:
