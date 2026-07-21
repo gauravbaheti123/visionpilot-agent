@@ -209,7 +209,7 @@ def process_camera(cam):
     person_first_seen = {}
     unique_ids = set()
     last_unique_save = time.time()
-    UNIQUE_SAVE_INTERVAL = 300  # Har 5 min mein save
+    UNIQUE_SAVE_INTERVAL = 60  # Har 1 min mein save
 
     print(f"📷 {cam_id} Connecting...")
     cap = cv2.VideoCapture(rtsp_url)
