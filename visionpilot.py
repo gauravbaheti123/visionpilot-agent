@@ -136,12 +136,9 @@ print(f"📋 Features: {features}")
 AFTER_HOURS = features.get("after_hours", False)
 AFTER_HOURS_START = features.get("after_hours_start", "21:00:00")
 AFTER_HOURS_END = features.get("after_hours_end", "09:00:00")
-LOITERING = features.get("loitering", False)
-LOITERING_THRESHOLD = features.get("loitering_threshold", 30)
 UNIQUE_COUNTING = features.get("unique_counting", False)
 
 print(f"⏰ After Hours: {AFTER_HOURS} ({AFTER_HOURS_START} - {AFTER_HOURS_END})")
-print(f"🚶 Loitering: {LOITERING} ({LOITERING_THRESHOLD}s)")
 print(f"👥 Unique Count: {UNIQUE_COUNTING}")
 
 def get_rtsp(channel):
@@ -184,7 +181,7 @@ def save_unique_count(cam_id, count):
             "date": datetime.now(IST).date().isoformat()
         }
         supabase.table("unique_counts").insert(data).execute()
-        print(f"👥 {cam_id} | Unique Count: {count} | Saved!")
+        print(f"👥 {cam_id} | Unique Count: {count} | ✅ Saved!")
     except Exception as e:
         print(f"❌ Unique count save error: {e}")
 
@@ -204,12 +201,11 @@ def process_camera(cam):
     channel = cam["channel"]
     rtsp_url = get_rtsp(channel)
 
-    ALERT_COOLDOWN = 30
+    ALERT_COOLDOWN = 300  # 5 min per camera
+    UNIQUE_SAVE_INTERVAL = 60  # 1 min mein save
     last_alert_time = 0
-    person_first_seen = {}
-    unique_ids = set()
     last_unique_save = time.time()
-    UNIQUE_SAVE_INTERVAL = 60  # Har 1 min mein save
+    unique_ids = set()
 
     print(f"📷 {cam_id} Connecting...")
     cap = cv2.VideoCapture(rtsp_url)
@@ -230,8 +226,8 @@ def process_camera(cam):
             cap = cv2.VideoCapture(rtsp_url)
             continue
 
-        # ━━ PERSON DETECTION
-        if UNIQUE_COUNTING or LOITERING:
+        # ━━ DETECTION — always use tracker for unique counting
+        if UNIQUE_COUNTING:
             results = model_tracker.track(
                 frame,
                 classes=[0],
@@ -244,56 +240,29 @@ def process_camera(cam):
         count = len(results[0].boxes)
 
         # ━━ UNIQUE COUNTING
-        if UNIQUE_COUNTING and results[0].boxes.id is not None:
-            track_ids = results[0].boxes.id.int().cpu().tolist()
-            for tid in track_ids:
-                unique_ids.add(tid)
+        if UNIQUE_COUNTING:
+            if results[0].boxes.id is not None:
+                track_ids = results[0].boxes.id.int().cpu().tolist()
+                for tid in track_ids:
+                    unique_ids.add(tid)
+                print(f"👁️ {cam_id} | Tracking: {track_ids} | Unique total: {len(unique_ids)}")
+            else:
+                print(f"⚠️ {cam_id} | No tracking IDs | People: {count}")
 
-            # Har 5 min mein Supabase pe save
+            # Har 1 min mein save
             if (current_time - last_unique_save) > UNIQUE_SAVE_INTERVAL:
-                save_unique_count(cam_id, len(unique_ids))
+                if len(unique_ids) > 0:
+                    save_unique_count(cam_id, len(unique_ids))
+                else:
+                    print(f"⏭️ {cam_id} | Unique count 0 — skip save")
                 last_unique_save = current_time
 
         # ━━ AFTER HOURS
         if AFTER_HOURS and is_after_hours():
-            if count > 0 and \
-               (current_time - last_alert_time) > ALERT_COOLDOWN:
-                drive_url = take_snapshot_and_upload(
-                    frame, cam_id, "intruder"
-                )
-                save_alert(
-                    cam_id, "after_hours_intruder",
-                    count, drive_url
-                )
+            if count > 0 and (current_time - last_alert_time) > ALERT_COOLDOWN:
+                drive_url = take_snapshot_and_upload(frame, cam_id, "intruder")
+                save_alert(cam_id, "after_hours_intruder", count, drive_url)
                 last_alert_time = current_time
-
-        # ━━ LOITERING
-        if LOITERING and results[0].boxes.id is not None:
-            track_ids = results[0].boxes.id.int().cpu().tolist()
-            for tid in track_ids:
-                if tid not in person_first_seen:
-                    person_first_seen[tid] = current_time
-                else:
-                    duration = current_time - person_first_seen[tid]
-                    if duration > LOITERING_THRESHOLD:
-                        if (current_time - last_alert_time) > ALERT_COOLDOWN:
-                            drive_url = take_snapshot_and_upload(
-                                frame, cam_id, "loitering"
-                            )
-                            save_alert(
-                                cam_id, "loitering_detected",
-                                1, drive_url
-                            )
-                            last_alert_time = current_time
-                            person_first_seen[tid] = current_time
-
-            active_ids = set(
-                results[0].boxes.id.int().cpu().tolist()
-            ) if results[0].boxes.id is not None else set()
-            person_first_seen = {
-                k: v for k, v in person_first_seen.items()
-                if k in active_ids
-            }
 
         # ━━ DISPLAY
         cv2.putText(frame, f"{cam_id} | People: {count}",
@@ -301,8 +270,7 @@ def process_camera(cam):
                     0.8, (0, 255, 0), 2)
 
         if UNIQUE_COUNTING:
-            cv2.putText(frame,
-                        f"Unique Today: {len(unique_ids)}",
+            cv2.putText(frame, f"Unique Today: {len(unique_ids)}",
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (255, 255, 0), 2)
 
